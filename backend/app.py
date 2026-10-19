@@ -1,6 +1,13 @@
 import os
+import sys
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
+
+# Ensure backend directory is always on sys.path
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from config import Config
 from models.database import init_db
 from routes.health import health_bp
@@ -14,7 +21,7 @@ def create_app():
     app.config.from_object(Config)
 
     # Enable CORS for local React/Vite development
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    CORS(app, resources={r"/api/*": {"origins": "*"}, r"/uploads/*": {"origins": "*"}})
 
     # Ensure database tables and initial baseline seeds are initialized
     init_db()
@@ -56,5 +63,6 @@ def create_app():
 if __name__ == "__main__":
     app = create_app()
     port = int(os.environ.get("FLASK_PORT", 5000))
-    print(f"[CropGuard] Crop Health Advisory Backend running on http://127.0.0.1:{port}")
-    app.run(host="0.0.0.0", port=port, debug=Config.DEBUG)
+    host = os.environ.get("FLASK_HOST", "0.0.0.0")
+    print(f"[Krishi Sathi AI] Crop Health Advisory Backend running on http://127.0.0.1:{port}")
+    app.run(host=host, port=port, debug=Config.DEBUG)

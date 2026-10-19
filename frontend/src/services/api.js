@@ -3,7 +3,9 @@
  * Connects React frontend to the Python/Flask database-backed backend.
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+// In development, empty API_BASE_URL routes through Vite proxy (see vite.config.js)
+// In custom deployments, VITE_API_BASE_URL can override the destination.
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 export const AUTH_STORAGE_KEY = 'krishi_sathi_auth_token';
 export const USER_STORAGE_KEY = 'krishi_sathi_user';
@@ -32,6 +34,13 @@ export function clearStoredSession() {
   localStorage.removeItem(USER_STORAGE_KEY);
 }
 
+export function getImageUrl(filename) {
+  if (!filename) return '';
+  if (filename.startsWith('http://') || filename.startsWith('https://')) return filename;
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || '';
+  return `${baseUrl}/uploads/${filename}`;
+}
+
 function getAuthHeaders(isFormData = false) {
   const headers = {};
   const token = getStoredToken();
@@ -44,19 +53,60 @@ function getAuthHeaders(isFormData = false) {
   return headers;
 }
 
+/**
+ * Robust fetch wrapper that translates low-level network errors into clear,
+ * actionable diagnostics and parses JSON error payloads.
+ */
+async function apiRequest(endpoint, options = {}) {
+  const url = endpoint.startsWith('http://') || endpoint.startsWith('https://')
+    ? endpoint
+    : `${API_BASE_URL}${endpoint}`;
+
+  let res;
+  try {
+    res = await fetch(url, options);
+  } catch (err) {
+    if (err.name === 'TypeError' && err.message.toLowerCase().includes('fetch')) {
+      throw new Error(
+        'Unable to connect to Krishi Sathi AI backend service. Please verify that the Flask backend is running on http://127.0.0.1:5000.'
+      );
+    }
+    throw err;
+  }
+
+  // Handle gateway or proxy errors that return HTML instead of JSON
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    if (!res.ok) {
+      throw new Error(
+        `Backend service unavailable (HTTP ${res.status}). Please verify that the Flask backend is running on http://127.0.0.1:5000.`
+      );
+    }
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    data = {};
+  }
+
+  if (!res.ok) {
+    throw new Error(data.error || data.message || `Request failed with HTTP status ${res.status}`);
+  }
+
+  return data;
+}
+
 /* ========================================================
    MODULE 1 & 2: AUTHENTICATION & OFFICER VERIFICATION
    ======================================================== */
 export async function registerUser(registrationData) {
-  const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
+  const data = await apiRequest('/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(registrationData)
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Registration failed');
-  }
   if (data.data?.token) {
     setStoredSession(data.data.token, data.data.user);
   }
@@ -64,15 +114,11 @@ export async function registerUser(registrationData) {
 }
 
 export async function loginUser(identifier, password) {
-  const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
+  const data = await apiRequest('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier, password })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Login failed');
-  }
   if (data.data?.token) {
     setStoredSession(data.data.token, data.data.user);
   }
@@ -81,7 +127,7 @@ export async function loginUser(identifier, password) {
 
 export async function logoutUser() {
   try {
-    await fetch(`${API_BASE_URL}/api/auth/logout`, {
+    await apiRequest('/api/auth/logout', {
       method: 'POST',
       headers: getAuthHeaders()
     });
@@ -97,14 +143,9 @@ export async function getCurrentUser() {
   if (!token) return null;
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/auth/me`, {
+    const data = await apiRequest('/api/auth/me', {
       headers: getAuthHeaders()
     });
-    if (!res.ok) {
-      clearStoredSession();
-      return null;
-    }
-    const data = await res.json();
     if (data.authenticated && data.user) {
       localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
       return data.user;
@@ -118,20 +159,15 @@ export async function getCurrentUser() {
 }
 
 export async function forgotPassword(identifier) {
-  const res = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
+  return await apiRequest('/api/auth/forgot-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Password reset request failed');
-  }
-  return data;
 }
 
 export async function adminVerifyOfficer(officerUserId, status, rejectionReason = '') {
-  const res = await fetch(`${API_BASE_URL}/api/auth/admin/verify-officer`, {
+  return await apiRequest('/api/auth/admin/verify-officer', {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({
@@ -140,19 +176,12 @@ export async function adminVerifyOfficer(officerUserId, status, rejectionReason 
       rejection_reason: rejectionReason
     })
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Verification failed');
-  }
-  return data;
 }
 
 export async function fetchPendingOfficers() {
-  const res = await fetch(`${API_BASE_URL}/api/auth/admin/pending-officers`, {
+  return await apiRequest('/api/auth/admin/pending-officers', {
     headers: getAuthHeaders()
   });
-  if (!res.ok) throw new Error('Failed to fetch pending officers');
-  return await res.json();
 }
 
 /* ========================================================
@@ -165,39 +194,29 @@ export async function submitCropAdvisory(formDataPayload) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${API_BASE_URL}/api/advisory/submit`, {
+  return await apiRequest('/api/advisory/submit', {
     method: 'POST',
     headers,
     body: formDataPayload
   });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to submit crop inquiry');
-  }
-  return data;
 }
 
 export async function fetchFarmerHistory(params = {}) {
-  const token = getStoredToken();
   const qs = new URLSearchParams();
   if (params.farmerName) qs.append('farmer_name', params.farmerName);
   if (params.crop) qs.append('crop', params.crop);
   if (params.status) qs.append('status', params.status);
 
-  const res = await fetch(`${API_BASE_URL}/api/advisory/history?${qs.toString()}`, {
+  const query = qs.toString() ? `?${qs.toString()}` : '';
+  return await apiRequest(`/api/advisory/history${query}`, {
     headers: getAuthHeaders()
   });
-  if (!res.ok) throw new Error('Failed to fetch case history');
-  return await res.json();
 }
 
 export async function fetchCaseDetails(caseId) {
-  const res = await fetch(`${API_BASE_URL}/api/advisory/case/${caseId}`, {
+  const data = await apiRequest(`/api/advisory/case/${caseId}`, {
     headers: getAuthHeaders()
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to fetch case details');
   return data.case;
 }
 
@@ -205,11 +224,9 @@ export async function fetchCaseDetails(caseId) {
    MODULE 4: TWO-WAY FARMER-OFFICER COMMUNICATION
    ======================================================== */
 export async function fetchCaseMessages(caseId) {
-  const res = await fetch(`${API_BASE_URL}/api/advisory/case/${caseId}/messages`, {
+  const data = await apiRequest(`/api/advisory/case/${caseId}/messages`, {
     headers: getAuthHeaders()
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to fetch messages');
   return data.messages || [];
 }
 
@@ -229,13 +246,11 @@ export async function sendCaseMessage(caseId, messageText, attachmentFile = null
     body = JSON.stringify({ message_text: messageText });
   }
 
-  const res = await fetch(`${API_BASE_URL}/api/advisory/case/${caseId}/messages`, {
+  const data = await apiRequest(`/api/advisory/case/${caseId}/messages`, {
     method: 'POST',
     headers,
     body
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to send message');
   return data.message;
 }
 
@@ -248,41 +263,32 @@ export async function fetchOfficerCases(params = {}) {
   if (params.status && params.status !== 'ALL') qs.append('status', params.status);
   if (params.search) qs.append('search', params.search);
 
-  const res = await fetch(`${API_BASE_URL}/api/officer/cases?${qs.toString()}`, {
+  const query = qs.toString() ? `?${qs.toString()}` : '';
+  return await apiRequest(`/api/officer/cases${query}`, {
     headers: getAuthHeaders()
   });
-  if (!res.ok) throw new Error('Failed to fetch officer cases');
-  return await res.json();
 }
 
 export async function submitOfficerReview(caseId, status, notes, finalAdvisory = '') {
-  const res = await fetch(`${API_BASE_URL}/api/officer/review/${caseId}`, {
+  return await apiRequest(`/api/officer/review/${caseId}`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({ status, notes, final_advisory: finalAdvisory })
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Officer review update failed');
-  return data;
 }
 
 export async function submitCaseFeedback(caseId, feedbackPayload) {
-  const res = await fetch(`${API_BASE_URL}/api/advisory/case/${caseId}/feedback`, {
+  return await apiRequest(`/api/advisory/case/${caseId}/feedback`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify(feedbackPayload)
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Feedback submission failed');
-  return data;
 }
 
 export async function fetchFeedbackSummary() {
-  const res = await fetch(`${API_BASE_URL}/api/officer/feedback-summary`, {
+  const data = await apiRequest('/api/officer/feedback-summary', {
     headers: getAuthHeaders()
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error('Failed to fetch feedback summary');
   return data.summary;
 }
 
@@ -290,17 +296,13 @@ export async function fetchFeedbackSummary() {
    MODULE 8: ENVIRONMENTAL & CLUSTER DATA
    ======================================================== */
 export async function fetchEnvironmentalCluster(location) {
-  const res = await fetch(`${API_BASE_URL}/api/advisory/environmental-cluster?location=${encodeURIComponent(location || 'Wardha, Maharashtra')}`);
-  if (!res.ok) throw new Error('Failed to fetch environmental data');
-  return await res.json();
+  return await apiRequest(`/api/advisory/environmental-cluster?location=${encodeURIComponent(location || 'Wardha, Maharashtra')}`);
 }
 
 export async function fetchWeatherContext(location) {
   try {
-    const url = `${API_BASE_URL}/api/advisory/weather?location=${encodeURIComponent(location || 'Wardha, Maharashtra')}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('Failed to fetch weather');
-    return await res.json();
+    const url = `/api/advisory/weather?location=${encodeURIComponent(location || 'Wardha, Maharashtra')}`;
+    return await apiRequest(url);
   } catch {
     return {
       location: location || 'Farming Zone',
@@ -319,9 +321,7 @@ export async function fetchWeatherContext(location) {
 
 export async function checkBackendHealth() {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/health`);
-    if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
-    return await res.json();
+    return await apiRequest('/api/health');
   } catch (err) {
     return {
       status: 'offline',
@@ -333,9 +333,7 @@ export async function checkBackendHealth() {
 
 export async function fetchModelStatus() {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/advisory/status`);
-    if (!res.ok) throw new Error('Status fetch failed');
-    return await res.json();
+    return await apiRequest('/api/advisory/status');
   } catch {
     return {
       ml_model_loaded: false,
@@ -358,9 +356,7 @@ import {
 
 export async function fetchStates() {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/locations/states`);
-    if (!res.ok) throw new Error('Network failed');
-    const data = await res.json();
+    const data = await apiRequest('/api/locations/states');
     if (data.states && data.states.length > 0) return data.states;
     return getDemoStates();
   } catch {
@@ -371,9 +367,7 @@ export async function fetchStates() {
 export async function fetchDistricts(state) {
   if (!state) return [];
   try {
-    const res = await fetch(`${API_BASE_URL}/api/locations/districts?state=${encodeURIComponent(state)}`);
-    if (!res.ok) throw new Error('Network failed');
-    const data = await res.json();
+    const data = await apiRequest(`/api/locations/districts?state=${encodeURIComponent(state)}`);
     if (data.districts && data.districts.length > 0) return data.districts;
     return getDemoDistricts(state);
   } catch {
@@ -384,9 +378,7 @@ export async function fetchDistricts(state) {
 export async function fetchTalukas(state, district) {
   if (!state || !district) return [];
   try {
-    const res = await fetch(`${API_BASE_URL}/api/locations/talukas?state=${encodeURIComponent(state)}&district=${encodeURIComponent(district)}`);
-    if (!res.ok) throw new Error('Network failed');
-    const data = await res.json();
+    const data = await apiRequest(`/api/locations/talukas?state=${encodeURIComponent(state)}&district=${encodeURIComponent(district)}`);
     if (data.talukas && data.talukas.length > 0) return data.talukas;
     return getDemoTalukas(state, district);
   } catch {
@@ -397,9 +389,7 @@ export async function fetchTalukas(state, district) {
 export async function fetchVillages(state, district, taluka) {
   if (!state || !district || !taluka) return [];
   try {
-    const res = await fetch(`${API_BASE_URL}/api/locations/villages?state=${encodeURIComponent(state)}&district=${encodeURIComponent(district)}&taluka=${encodeURIComponent(taluka)}`);
-    if (!res.ok) throw new Error('Network failed');
-    const data = await res.json();
+    const data = await apiRequest(`/api/locations/villages?state=${encodeURIComponent(state)}&district=${encodeURIComponent(district)}&taluka=${encodeURIComponent(taluka)}`);
     if (data.villages && data.villages.length > 0) return data.villages;
     return getDemoVillages(state, district, taluka);
   } catch {
@@ -408,7 +398,7 @@ export async function fetchVillages(state, district, taluka) {
 }
 
 export async function updateFarmerProfile(profileData) {
-  const res = await fetch(`${API_BASE_URL}/api/auth/profile/update`, {
+  const data = await apiRequest('/api/auth/profile/update', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -416,11 +406,8 @@ export async function updateFarmerProfile(profileData) {
     },
     body: JSON.stringify(profileData)
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to update farm profile');
   if (data.user) {
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
   }
   return data;
 }
-

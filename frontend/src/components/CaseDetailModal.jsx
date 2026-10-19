@@ -21,7 +21,8 @@ import {
   fetchCaseMessages,
   sendCaseMessage,
   submitOfficerReview,
-  submitCaseFeedback
+  submitCaseFeedback,
+  getImageUrl
 } from '../services/api';
 
 export default function CaseDetailModal({ caseId, currentUser, onClose, onCaseUpdated }) {
@@ -253,7 +254,7 @@ export default function CaseDetailModal({ caseId, currentUser, onClose, onCaseUp
             <h4>Uploaded Leaf / Crop Sample Photo:</h4>
             <div className="image-preview-wrapper" style={{ maxHeight: '200px' }}>
               <img
-                src={`http://localhost:5000/uploads/${caseData.image_filename}`}
+                src={getImageUrl(caseData.image_filename)}
                 alt="Crop Sample"
                 className="image-preview"
                 onError={(e) => {
